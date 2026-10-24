@@ -44,7 +44,7 @@ is an in-memory, expiring routing hint, not durable chat storage. Restarting CPA
 loses bindings. One Antigravity account cannot fail over to a Meta account for a
 Gemini model.
 
-## Antigravity 429 boundary (feature branch)
+## Antigravity 429 boundary (private RP mode)
 
 With `CPA_PRIVATE_RP=1`, an Antigravity 429 terminates the current request. It
 cannot retry another credential, a model pool, credits, or the SSE bootstrap.
@@ -139,12 +139,23 @@ runs as UID/GID 10001 with a read-only root filesystem. The runtime is a single
 writer with a writable `/data` PVC containing `auth/`, `config.yaml`, the local
 model catalog, and management assets. OAuth refresh updates persist on that PVC.
 
-The homelab Helm chart lives in `convertor-gitops/charts/cliproxyapi` and is
-installed directly as release/namespace `cliproxyapi`; it is not registered with
-ArgoCD. Upgrade with `helm upgrade --install`, and use `helm rollback` to revert
-the workload image. Image rollback does not roll back mutable credential/config
-files: take a state backup before upgrades. Never restore stale OAuth files over
-newer refreshed files without stopping the writer and reviewing the restore.
+Since 2026-10-25, ArgoCD owns the formal deployment as Application `cliproxyapi`
+in namespace `argocd`. Its wave-5 ApplicationSet element is
+`convertor-gitops/argo-cd/argocd-bootstrap/apps/wave-5/cliproxyapi.yaml`; the chart
+and pinned image digest live in `convertor-gitops/charts/cliproxyapi` on branch
+`feature/argocd`. The Application adopted the existing namespace and OAuth PVC.
+
+Deploy by validating the chart, committing/pushing the digest to that branch,
+then running `cd argo-cd && just refresh-sync cliproxyapi` in the GitOps repo.
+The ApplicationSet is bootstrapped through the repository's `just update` flow
+when adding an element. Do not upgrade/rollback the formal CPA with direct Helm
+commands: ArgoCD self-heal follows Git. Roll back the workload by reverting the
+GitOps image change and synchronizing. The old manual Helm release history is
+historical; do not uninstall it against the adopted resources.
+
+Image rollback does not roll back mutable credential/config files. Take a state
+backup before upgrades. Never restore stale OAuth files over newer refreshed
+files without stopping the writer and reviewing the restore.
 
 The bootstrap Secret is created outside Git and only seeds missing config/catalog
 files. It does not replace live configuration on each restart and does not store
@@ -160,13 +171,14 @@ Management is loopback-only, reached using:
 kubectl --context admin@homelab-cluster -n cliproxyapi port-forward --address=127.0.0.1 service/cliproxyapi 18317:8317
 ```
 
-The ingress NetworkPolicy admits only the frontend namespaces, the old lab
-namespace during transition, and the service's own namespace. There is no public
-Ingress or NodePort. The lab Service `proxy` is an ExternalName bridge to the
-formal service so existing test frontends retain their chat data and settings;
-the old lab proxy Deployment is scaled to zero. One legacy frontend API key is
-retained for this bridge until those test frontends are retired. New integrations
-have separate keys. Frontend databases themselves are not migrated by this chart.
+The ingress NetworkPolicy admits only namespaces `open-webui`, `librechat`, and
+`cliproxyapi`. There is no public Ingress or NodePort. On 2026-10-25 the disposable
+`rp-lab-20261023` namespace, both test frontends, test MongoDB/data, and the proxy
+bridge were deleted. Its legacy client API key was revoked from both live config
+and the bootstrap seed; its local test directory/forwarding entrypoints were
+retired. The two separate frontend keys remain available for formal integrations.
+The existing production OpenWebUI/LibreChat deployments and databases were not
+modified or migrated by this retirement.
 
 Create an owner-only backup directory, then run (archives contain live secrets):
 
