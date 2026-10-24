@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Synthetic capacity fixture; not proof of subscription exhaustion.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "MODEL_CAPACITY_EXHAUSTED"},
+      {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "30s"}
+    ]
+  }
+}

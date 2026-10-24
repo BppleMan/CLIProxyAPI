@@ -44,6 +44,9 @@ const (
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
 func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) {
+	m.rpQuotaJobs.mu.Lock()
+	m.rpQuotaJobs.stopped = false
+	m.rpQuotaJobs.mu.Unlock()
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
@@ -73,6 +76,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 // StopAutoRefresh cancels the background refresh loop, if running.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	m.stopPrivateRPQuotaRefreshes()
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	m.refreshCancel = nil

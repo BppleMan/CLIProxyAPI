@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -349,14 +350,20 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+type antigravityStatusErr struct{ statusErr }
+
+func (e antigravityStatusErr) IsPrivateRPQuotaBoundary() bool {
+	return rpmode.Enabled() && e.code == http.StatusTooManyRequests
+}
+
+func newAntigravityStatusErr(statusCode int, body []byte) antigravityStatusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
 	}
-	return err
+	return antigravityStatusErr{statusErr: err}
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {

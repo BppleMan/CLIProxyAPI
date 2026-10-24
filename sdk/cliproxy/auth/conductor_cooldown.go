@@ -933,6 +933,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
 		}
 		auth.recordRecentRequest(now, result.Success)
+		if !result.Success && privateRPAntigravity(auth) && statusCodeFromResult(result.Error) == 429 {
+			quarantinePrivateRPQuota(auth, &result, now)
+		}
 		if result.Success {
 			auth.Success++
 		} else {
@@ -1384,6 +1387,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		reg.ApplyClientModelProjections(result.AuthID, regEpoch, authSnapshot.Generation, projections)
 	}
 
+	if authSnapshot != nil && !result.Success && statusCodeFromResult(result.Error) == 429 {
+		m.queuePrivateRPQuotaRefresh(ctx, authSnapshot)
+	}
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)

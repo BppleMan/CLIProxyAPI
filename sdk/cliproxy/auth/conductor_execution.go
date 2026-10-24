@@ -122,6 +122,7 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	m.refreshDuePrivateRPQuotas(ctx)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -143,7 +144,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if errExec == nil {
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) || IsPrivateRPQuotaBoundary(normalized, errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
@@ -182,6 +183,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	m.refreshDuePrivateRPQuotas(ctx)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -203,7 +205,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) || IsPrivateRPQuotaBoundary(normalized, errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
@@ -235,6 +237,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
+	m.refreshDuePrivateRPQuotas(ctx)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -278,7 +281,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
+		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) || IsPrivateRPQuotaBoundary(normalized, errStream) {
 			return nil, unwrapExecutionBoundaryError(errStream)
 		}
 		lastErr = errStream

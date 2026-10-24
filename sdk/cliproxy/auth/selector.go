@@ -827,6 +827,13 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if privateRPQuotaBlocked(auth) {
+		due := privateRPQuotaDue(auth)
+		if !due.After(now) {
+			due = now.Add(time.Second)
+		}
+		return true, blockReasonCooldown, due
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return true, blockReasonOther, time.Time{}
 	}
