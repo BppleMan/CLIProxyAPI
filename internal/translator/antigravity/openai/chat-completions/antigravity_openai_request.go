@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -37,6 +38,19 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, st
 // receive when it leaves a user turn with nothing to send.
 func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	if rpmode.Enabled() {
+		seenConversation := false
+		for _, m := range gjson.GetBytes(rawJSON, "messages").Array() {
+			role := m.Get("role").String()
+			if role == "system" || role == "developer" {
+				if seenConversation {
+					return nil, fmt.Errorf("private RP requires system/developer instructions before conversation messages; move them to the system prompt")
+				}
+			} else {
+				seenConversation = true
+			}
+		}
+	}
 	var drops translatorcommon.UserTurnDrops
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 	// Base envelope (no default thinkingConfig)
@@ -135,6 +149,23 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	if rpmode.Enabled() {
+		stop := gjson.GetBytes(rawJSON, "stop")
+		if stop.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.stopSequences", []string{stop.String()})
+		} else if stop.IsArray() {
+			values := []string{}
+			for _, item := range stop.Array() {
+				if item.Type != gjson.String {
+					return nil, fmt.Errorf("stop must contain only strings")
+				}
+				values = append(values, item.String())
+			}
+			out, _ = sjson.SetBytes(out, "request.generationConfig.stopSequences", values)
+		} else if stop.Exists() && stop.Type != gjson.Null {
+			return nil, fmt.Errorf("stop must be a string or array")
+		}
+	}
 	// messages -> systemInstruction + contents
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {

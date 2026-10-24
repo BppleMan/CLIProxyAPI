@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -90,6 +91,9 @@ func formatLogFieldValue(key string, value any) string {
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
+	if rpmode.Enabled() {
+		return []byte(fmt.Sprintf("%s level=%s private-rp event details suppressed\n", entry.Time.Format("2006-01-02T15:04:05Z07:00"), entry.Level)), nil
+	}
 	var buffer *bytes.Buffer
 	if entry.Buffer != nil {
 		buffer = entry.Buffer

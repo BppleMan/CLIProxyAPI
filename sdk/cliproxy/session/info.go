@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -99,6 +100,14 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if scope, ok := metadata[cliproxyexecutor.CallerScopeMetadataKey].(string); ok {
 			info.CallerScope = strings.TrimSpace(scope)
 		}
+	}
+	if sid, present, err := rpmode.FrontendSession(headers); present {
+		if err != nil {
+			return info, false
+		}
+		info.SessionID = sid
+		info.ClientType = "private-rp"
+		return info, true
 	}
 
 	var root sessionObject

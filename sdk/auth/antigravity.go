@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -210,6 +211,9 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 		port = antigravity.CallbackPort
 	}
 	addr := fmt.Sprintf(":%d", port)
+	if rpmode.Enabled() {
+		addr = fmt.Sprintf("127.0.0.1:%d", port)
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, 0, nil, err

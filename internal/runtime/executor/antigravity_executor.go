@@ -17,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
@@ -66,7 +67,7 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 }
 
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	if rpmode.Enabled() || e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
 		return payload
 	}
 	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
