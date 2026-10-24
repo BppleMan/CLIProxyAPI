@@ -88,7 +88,55 @@ same-model account failover through OpenWebUI. The mock saw no raw X-RP headers.
 No real Google/Meta generation or two-real-Antigravity-account quota exhaustion
 was exercised. The broader upstream suite is not claimed as passing.
 
-## Upstream maintenance
+## Production deployment
+
+The fork image is published by `private-rp-image.yml` after RP regression tests,
+at `ghcr.io/bppleman/cliproxyapi-rp:sha-<full-commit>`. Deploy by digest. The image
+runs as UID/GID 10001 with a read-only root filesystem. The runtime is a single
+writer with a writable `/data` PVC containing `auth/`, `config.yaml`, the local
+model catalog, and management assets. OAuth refresh updates persist on that PVC.
+
+The homelab Helm chart lives in `convertor-gitops/charts/cliproxyapi` and is
+installed directly as release/namespace `cliproxyapi`; it is not registered with
+ArgoCD. Upgrade with `helm upgrade --install`, and use `helm rollback` to revert
+the workload image. Image rollback does not roll back mutable credential/config
+files: take a state backup before upgrades. Never restore stale OAuth files over
+newer refreshed files without stopping the writer and reviewing the restore.
+
+The bootstrap Secret is created outside Git and only seeds missing config/catalog
+files. It does not replace live configuration on each restart and does not store
+OAuth files. The PVC and namespace have deletion protection annotations; the
+storage class uses `Retain`. These protect against accidental removal, not disk
+failure. Keep an independent backup. Credentials are ordinary plaintext JSON on
+storage; owner-only permissions do not constitute encryption.
+
+Model API: `http://cliproxyapi.cliproxyapi.svc.cluster.local:8317/v1`.
+Management is loopback-only, reached using:
+
+```sh
+kubectl --context admin@homelab-cluster -n cliproxyapi port-forward --address=127.0.0.1 service/cliproxyapi 18317:8317
+```
+
+The ingress NetworkPolicy admits only the frontend namespaces, the old lab
+namespace during transition, and the service's own namespace. There is no public
+Ingress or NodePort. The lab Service `proxy` is an ExternalName bridge to the
+formal service so existing test frontends retain their chat data and settings;
+the old lab proxy Deployment is scaled to zero. One legacy frontend API key is
+retained for this bridge until those test frontends are retired. New integrations
+have separate keys. Frontend databases themselves are not migrated by this chart.
+
+Create an owner-only backup directory, then run (archives contain live secrets):
+
+```sh
+mkdir -m 700 /path/to/private-backups
+python3 deploy/backup.py --destination /path/to/private-backups/cpa-state-YYYYMMDD.tar
+```
+
+The command refuses an existing archive or a directory readable by others,
+checks OAuth JSON and catalog JSON, and reports only provider types/counts and
+the archive SHA-256. Archive mode is 0600. No credentials are printed.
+
+## Upstream maintenance procedure
 
 - `origin`: personal fork; `upstream`: router-for-me/CLIProxyAPI.
 - `rp/main`: maintained custom branch. Base of this patch: `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683`.
