@@ -187,6 +187,9 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 	if err == nil {
 		return "", false
 	}
+	if privateRPAntigravity(auth) && statusCodeFromError(err) == 429 {
+		return RequestScopedActionStopAndCooldown, true
+	}
 	rules := extractRequestScopedErrorRules(auth, cfg)
 	if len(rules) == 0 {
 		return "", false

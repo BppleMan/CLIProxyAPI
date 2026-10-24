@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Synthetic rate limit fixture; not a captured server message.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"},
+      {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.500s"}
+    ]
+  }
+}

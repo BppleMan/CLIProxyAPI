@@ -23,5 +23,9 @@ jobs:
         run: go test ./internal/rpmode ./sdk/cliproxy/session ./sdk/cliproxy/auth ./internal/api/middleware -run 'Test(FrontendSession|PrivateRP|ManagerExecuteAndStreamRebindOnQuotaEndToEnd|ManagerSessionAffinityRebindOnQuota)' -count=1
       - name: RP payload and logging regressions
         run: go test ./internal/translator/antigravity/openai/chat-completions ./internal/logging ./internal/runtime/executor -run 'Test(PrivateRP|AntigravityBuildRequest|ConvertOpenAIRequestToAntigravity)' -count=1
+      - name: Antigravity quota contract and HTTP boundary
+        run: go test ./internal/runtime/executor/helps ./sdk/api/handlers ./test -run TestPrivateRPQuota -count=1
+      - name: Quota concurrency checks
+        run: go test -race ./sdk/cliproxy/auth ./test -run TestPrivateRPQuota -count=1
       - name: Build
         run: CGO_ENABLED=0 go build -o /tmp/cliproxy-rp ./cmd/server

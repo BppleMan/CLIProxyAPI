@@ -44,6 +44,49 @@ is an in-memory, expiring routing hint, not durable chat storage. Restarting CPA
 loses bindings. One Antigravity account cannot fail over to a Meta account for a
 Gemini model.
 
+## Antigravity 429 boundary (feature branch)
+
+With `CPA_PRIVATE_RP=1`, an Antigravity 429 terminates the current request. It
+cannot retry another credential, a model pool, credits, or the SSE bootstrap.
+After output has started, the existing stream error framing is used; an HTTP
+status already committed as 200 cannot become 429. Other providers and mode-off
+behavior retain upstream semantics.
+
+Before returning the error, the manager persists an account-wide RP quarantine.
+This is a conservative scheduling policy, not a statement that every model's
+subscription quota is zero. All models and chats exclude the quarantined account.
+The next client request, including an automatic client retry, may select another
+eligible account. No explicit continuation signal is required.
+
+One quota-only POST to `retrieveUserQuotaSummary` is queued per quarantined auth;
+at most four are sent concurrently. It uses the existing account endpoint, proxy,
+UA, and current access token. Quota observation does not rotate an expiring token
+on an unpersisted clone: normal OAuth refresh owns credential acquisition.
+Successful generation responses never trigger a quota query. There is no idle
+quota polling; later requests revalidate accounts whose retry/reset boundary is due.
+
+Remaining values are stored only from validated quota responses. Unknown is not
+zero or full. A failed/empty/malformed query leaves quarantine intact. A positive
+response immediately after a 429 is retained for observation but cannot release
+quarantine before the retry boundary. Zero/disabled buckets extend revalidation
+to their known reset times; no five-hour deadline is invented. Re-enabling requires
+a fresh positive observation of all returned baseline buckets after the boundary.
+This intentionally favors exclusion when bucket-to-model scope is uncertain.
+
+Registration/credential versions and a new per-429 fence reject stale probe
+results. Job cancellation is tied to manager shutdown. Quarantine and its latest
+snapshot are persisted in auth metadata; a restart retains exclusion. Session
+affinity itself is still upstream's in-memory model-scoped hint in this PR.
+Session-only global balancing, durable session counts, and proactive 90% admission
+are separate follow-up features, not implemented by this quota-boundary change.
+
+The contract fixtures and provenance are under
+`test/fixtures/antigravity-quota/`. They are reconstructed from client parsing and
+protocol descriptors, not claimed as live captures. Tests exercise real CPA
+OpenAI handlers and the Antigravity executor against local synthetic HTTP/SSE
+responses, including no-eligible-account handling. They do not consume Google
+quota or prove current backend acceptance of the quota endpoint for every account.
+
 ## Frontend headers
 
 OpenWebUI provider connection `headers` (no user-info forwarding switch required):
