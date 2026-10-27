@@ -27,5 +27,7 @@ jobs:
         run: go test ./internal/runtime/executor/helps ./sdk/api/handlers ./test -run TestPrivateRPQuota -count=1
       - name: Quota concurrency checks
         run: go test -race ./sdk/cliproxy/auth ./test -run TestPrivateRPQuota -count=1
+      - name: Native Gemini metadata contract
+        run: go test ./internal/registry ./internal/translator/antigravity/gemini -count=1
       - name: Build
         run: CGO_ENABLED=0 go build -o /tmp/cliproxy-rp ./cmd/server

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -1789,6 +1790,11 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 
 	case "gemini":
 		result := map[string]any{}
+		if rpmode.Enabled() && model.Thinking != nil {
+			thinking := *model.Thinking
+			thinking.Levels = append([]string(nil), model.Thinking.Levels...)
+			result["thinkingSupport"] = &thinking
+		}
 		if model.Name != "" {
 			result["name"] = model.Name
 		} else {

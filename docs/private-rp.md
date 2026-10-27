@@ -218,3 +218,22 @@ Review changes to translators, final payload rules, session extraction, logging,
 auth refresh, model catalogs, and frontend versions especially carefully. Merge
 the synchronization PR only after checks pass. Do not silently replace a running
 instance just because upstream has changed. Use commit-addressed test builds.
+
+## Native client metadata (OI stage 6)
+
+With `CPA_PRIVATE_RP=1`, Gemini model discovery exposes `thinkingSupport` from
+the registered model capability: `min`, `max`, `levels`, `zero_allowed` and
+`dynamic_allowed`. Consumers must not infer levels from names or treat unknown
+capabilities as supported. Disabling private RP leaves discovery unchanged.
+
+Gemini candidate endings expose `cpaFinishReasonSource`: `provider` for a
+provider finish reason, `synthetic_done` for a locally synthesized streaming
+terminal candidate, and `synthetic_nonstream` for a synthesized JSON ending.
+The original `finishReason` and signed content are preserved. OI treats
+synthetic endings as unconfirmed completion. Older deployments without this
+field remain explicitly `unspecified`; clients must not invent provenance.
+
+These additive fields do not alter OAuth, account scheduling, quota/429 rules
+or payload overrides. Tests cover private-mode isolation, immutable discovery
+metadata, preserved signatures and real/synthetic endings. Deploy separately
+through GitOps after integration acceptance.
