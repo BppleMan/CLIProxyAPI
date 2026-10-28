@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 )
@@ -14,6 +15,26 @@ type PrivateFrameRedactor struct {
 }
 
 const privateFrameLimit = 32 * 1024 * 1024
+const privateFrameTotalLimit = 64 * 1024 * 1024
+
+var privateFrameBytes atomic.Int64
+
+func reservePrivateFrameBytes(n int) bool {
+	for {
+		current := privateFrameBytes.Load()
+		if current+int64(n) > privateFrameTotalLimit {
+			return false
+		}
+		if privateFrameBytes.CompareAndSwap(current, current+int64(n)) {
+			return true
+		}
+	}
+}
+
+func (r *PrivateFrameRedactor) clearPending() {
+	privateFrameBytes.Add(-int64(len(r.pending)))
+	r.pending = nil
+}
 
 func privateFramePayload(frame []byte) ([]byte, int) {
 	start := 0
@@ -58,7 +79,7 @@ func (r *PrivateFrameRedactor) Feed(chunk []byte, emit func([]byte)) {
 	trimmed := bytes.TrimLeft(chunk, " \t")
 	if len(r.pending) > 0 && (bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:"))) {
 		emit(RedactPrivateFrame(r.pending))
-		r.pending = nil
+		r.clearPending()
 	}
 	for len(chunk) > 0 {
 		index := bytes.IndexByte(chunk, '\n')
@@ -69,8 +90,8 @@ func (r *PrivateFrameRedactor) Feed(chunk []byte, emit func([]byte)) {
 		part := chunk[:length]
 		chunk = chunk[length:]
 		if !r.discarding {
-			if len(r.pending)+len(part) > privateFrameLimit {
-				r.pending = nil
+			if len(r.pending)+len(part) > privateFrameLimit || !reservePrivateFrameBytes(len(part)) {
+				r.clearPending()
 				r.discarding = true
 				ReportPrivateCaptureFailure()
 			} else {
@@ -83,7 +104,7 @@ func (r *PrivateFrameRedactor) Feed(chunk []byte, emit func([]byte)) {
 			} else {
 				emit(RedactPrivateFrame(r.pending))
 			}
-			r.pending = nil
+			r.clearPending()
 			r.discarding = false
 		}
 	}
@@ -91,7 +112,7 @@ func (r *PrivateFrameRedactor) Feed(chunk []byte, emit func([]byte)) {
 		payload, _ := privateFramePayload(r.pending)
 		if privateStructuredFrame(payload) && gjson.ValidBytes(payload) {
 			emit(RedactPrivateFrame(r.pending))
-			r.pending = nil
+			r.clearPending()
 		}
 	}
 }
@@ -102,6 +123,6 @@ func (r *PrivateFrameRedactor) Finish(emit func([]byte)) {
 	} else if len(r.pending) > 0 {
 		emit(RedactPrivateFrame(r.pending))
 	}
-	r.pending = nil
+	r.clearPending()
 	r.discarding = false
 }

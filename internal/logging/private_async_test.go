@@ -118,3 +118,18 @@ func TestPrivateFrameRedactionAcrossChunks(t *testing.T) {
 		t.Fatalf("unsafe streamed frame: %s", value)
 	}
 }
+
+func TestPrivateFrameBudgetDropsSafely(t *testing.T) {
+	if !reservePrivateFrameBytes(privateFrameTotalLimit) {
+		t.Fatal("unexpected active frame reservation")
+	}
+	defer privateFrameBytes.Add(-privateFrameTotalLimit)
+	var redactor PrivateFrameRedactor
+	var result bytes.Buffer
+	emit := func(p []byte) { _, _ = result.Write(p) }
+	redactor.Feed([]byte(`data: {"api_key":"SECRET"}`), emit)
+	redactor.Finish(emit)
+	if strings.Contains(result.String(), "SECRET") || !strings.Contains(result.String(), "omitted") {
+		t.Fatalf("budget exhaustion did not omit the frame safely: %s", result.String())
+	}
+}

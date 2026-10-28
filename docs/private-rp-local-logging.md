@@ -22,8 +22,9 @@ number of days of retention.
 
 Disk writes run in bounded background workers, so a stalled log filesystem does
 not block inference. At most 16 requests are captured concurrently, and the
-shared upstream capture queue is limited to 96 MiB. Streaming frames larger
-than 32 MiB or frames that cannot be safely parsed are omitted. If the writer
+shared upstream capture queue is limited to 96 MiB. In-progress streaming
+frames share a 64 MiB memory budget. Frames larger than 32 MiB, frames that
+exceed the shared budget, or frames that cannot be safely parsed are omitted. If the writer
 cannot keep up, log records can be incomplete; inference continues unchanged.
 Capture failures and dropped chunks appear in the management panel and are
 process-local counters that reset on restart. In-progress or queued records can
