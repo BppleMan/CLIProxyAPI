@@ -134,8 +134,9 @@ func sensitiveCredentialName(key string) bool {
 	}
 	switch key {
 	case "key", "apikey", "token", "accesstoken", "refreshtoken", "idtoken",
-		"oauthtoken", "oauthaccesstoken", "clientsecret", "authorization",
-		"password", "secret", "credential", "credentials", "cookie", "setcookie":
+		"oauthtoken", "oauthaccesstoken", "sessiontoken", "bearertoken", "authtoken", "securitytoken",
+		"clientsecret", "secretkey", "privatekey", "sessionkey", "authorization",
+		"password", "passphrase", "secret", "credential", "credentials", "cookie", "setcookie":
 		return true
 	default:
 		return false

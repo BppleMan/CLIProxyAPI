@@ -29,6 +29,10 @@ func TestPrivateRPLogRedaction(t *testing.T) {
 	if string(body) != `{"messages":[{"content":"ordinary prompt"}], "auth":{"access_token":"known-secret","refresh_token":"another-secret"},"model":"gemini"}` {
 		t.Fatal("redaction mutated the original request")
 	}
+	extra := string(RedactCredentialFields([]byte(`{"session_token":"SESSION_SECRET","private_key":"PRIVATE_SECRET","key":"KEY_SECRET","content":"kept"}`)))
+	if strings.Contains(extra, "SESSION_SECRET") || strings.Contains(extra, "PRIVATE_SECRET") || strings.Contains(extra, "KEY_SECRET") || !strings.Contains(extra, "kept") {
+		t.Fatalf("additional credential field leaked: %s", extra)
+	}
 }
 
 func TestPrivateRPMultipartAndFormRedaction(t *testing.T) {
