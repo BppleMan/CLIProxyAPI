@@ -17,8 +17,8 @@ func TestPrivateRPLogRedaction(t *testing.T) {
 	if got := RedactHeaderValue("Content-Type", "application/json"); got != "application/json" {
 		t.Fatalf("non-secret header changed: %q", got)
 	}
-	url := RedactURL("https://user:password@example.test/v1?access_token=known-secret&model=gemini")
-	if strings.Contains(url, "known-secret") || strings.Contains(url, "password") || !strings.Contains(url, "model=gemini") {
+	url := RedactURL("https://user:password@example.test/v1?access_token=known-secret&x-api-key=other-secret&model=gemini")
+	if strings.Contains(url, "known-secret") || strings.Contains(url, "other-secret") || strings.Contains(url, "password") || !strings.Contains(url, "model=gemini") {
 		t.Fatalf("unsafe URL: %s", url)
 	}
 	body := []byte(`{"messages":[{"content":"ordinary prompt"}], "auth":{"access_token":"known-secret","refresh_token":"another-secret"},"model":"gemini"}`)

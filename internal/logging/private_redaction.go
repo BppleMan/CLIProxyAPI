@@ -27,7 +27,7 @@ func RedactHeaderValue(key, value string) string {
 	if strings.Contains(lower, "authorization") || strings.Contains(lower, "cookie") ||
 		strings.Contains(lower, "api-key") || strings.Contains(lower, "api_key") ||
 		strings.Contains(lower, "apikey") || strings.Contains(lower, "token") ||
-		strings.Contains(lower, "secret") || lower == "x-goog-api-client-key" {
+		strings.Contains(lower, "secret") || lower == "authentication" || lower == "x-auth" || lower == "x-goog-api-client-key" {
 		return redactedValue
 	}
 	return value
@@ -120,10 +120,13 @@ func redactMultipartBody(body []byte, boundary string) ([]byte, error) {
 func sensitiveCredentialName(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", "")
+	if strings.Contains(key, "apikey") || strings.HasSuffix(key, "accesstoken") || strings.HasSuffix(key, "refreshtoken") {
+		return true
+	}
 	switch key {
 	case "key", "apikey", "token", "accesstoken", "refreshtoken", "idtoken",
 		"oauthtoken", "oauthaccesstoken", "clientsecret", "authorization",
-		"password", "cookie", "setcookie":
+		"password", "secret", "credential", "credentials", "cookie", "setcookie":
 		return true
 	default:
 		return false
@@ -147,7 +150,8 @@ func RedactURL(raw string) string {
 		return parsed.String()
 	}
 	for key := range values {
-		if sensitiveCredentialName(key) || strings.Contains(strings.ToLower(key), "token") || strings.Contains(strings.ToLower(key), "secret") {
+		lower := strings.ToLower(strings.TrimSuffix(key, "[]"))
+		if sensitiveCredentialName(lower) || lower == "value" || lower == "code" || strings.Contains(lower, "api-key") || strings.Contains(lower, "api_key") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") {
 			values[key] = []string{redactedValue}
 		}
 	}
