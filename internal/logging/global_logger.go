@@ -194,6 +194,10 @@ func ResolveLogDirectory(cfg *config.Config) string {
 	if base := util.WritablePath(); base != "" {
 		return filepath.Join(base, "logs")
 	}
+	if rpmode.RequestLoggingEnabled() {
+		// Never fall back into the OAuth volume when the dedicated log mount is unavailable.
+		return logDir
+	}
 	if cfg == nil {
 		return logDir
 	}
@@ -224,6 +228,9 @@ func ConfigureLogOutput(cfg *config.Config) error {
 	if cfg.LoggingToFile {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
+		}
+		if rpmode.RequestLoggingEnabled() && !isDirWritable(logDir) {
+			return fmt.Errorf("logging: private log directory is not writable")
 		}
 		if logWriter != nil {
 			_ = logWriter.Close()

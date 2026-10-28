@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -94,10 +95,14 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
 		default: // Channel full, skip logging to avoid blocking
+			w.markStreamingLogIncomplete()
 		}
 		return n, err
 	}
 
+	if w.isStreaming && w.streamWriter == nil && rpmode.RequestLoggingEnabled() {
+		return n, err
+	}
 	if w.shouldBufferResponseBody() {
 		w.body.Write(data)
 	}
@@ -146,10 +151,14 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
+			w.markStreamingLogIncomplete()
 		}
 		return n, err
 	}
 
+	if w.isStreaming && w.streamWriter == nil && rpmode.RequestLoggingEnabled() {
+		return n, err
+	}
 	if w.shouldBufferResponseBody() {
 		w.body.WriteString(data)
 	}
@@ -185,15 +194,23 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.streamDone = doneChan
 
 			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
+			go w.processStreamingChunks(doneChan, w.chunkChannel, streamWriter)
 
 			// Write status immediately
 			_ = streamWriter.WriteStatus(statusCode, w.headers)
+		} else if rpmode.RequestLoggingEnabled() {
+			logging.ReportPrivateCaptureFailure()
 		}
 	}
 
 	// Call original WriteHeader
 	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *ResponseWriterWrapper) markStreamingLogIncomplete() {
+	if marker, ok := w.streamWriter.(interface{ MarkIncomplete() }); ok {
+		marker.MarkIncomplete()
+	}
 }
 
 // ensureHeadersCaptured is a helper function to make sure response headers are captured.
@@ -247,19 +264,19 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
+func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}, chunks <-chan []byte, writer logging.StreamingLogWriter) {
 	if done == nil {
 		return
 	}
 
 	defer close(done)
 
-	if w.streamWriter == nil || w.chunkChannel == nil {
+	if writer == nil || chunks == nil {
 		return
 	}
 
-	for chunk := range w.chunkChannel {
-		w.streamWriter.WriteChunkAsync(chunk)
+	for chunk := range chunks {
+		writer.WriteChunkAsync(chunk)
 	}
 }
 
@@ -298,12 +315,18 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
+	privateIncomplete := rpmode.RequestLoggingEnabled() && c.GetBool(logging.PrivateCaptureIncompleteContextKey)
 	if !w.logger.IsEnabled() && !forceLog {
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
+		if privateIncomplete {
+			if marker, ok := w.streamWriter.(interface{ MarkCaptureIncomplete() }); ok {
+				marker.MarkCaptureIncomplete()
+			}
+		}
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
 			w.chunkChannel = nil
@@ -378,7 +401,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if forceLog && len(apiRequest) == 0 {
 		apiRequest = w.extractDeferredAPIRequest(c)
 	}
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	apiResponse := w.extractAPIResponse(c)
+	if privateIncomplete {
+		apiResponse = append(apiResponse, []byte("\n=== LOG CAPTURE INCOMPLETE: UPSTREAM RECORDING FAILED ===\n")...)
+	}
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, apiResponse, apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {

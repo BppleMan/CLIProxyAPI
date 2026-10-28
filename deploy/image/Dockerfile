@@ -3,6 +3,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && mkdir -p /app /data \
     && chown 10001:10001 /app /data
 COPY --chmod=0555 build/cliproxyapi /app/cliproxyapi
+COPY --chmod=0555 build/private-rp-logging-config /app/private-rp-logging-config
+COPY --chmod=0444 build/management.html /app/management.html
 ARG VCS_REF
 LABEL org.opencontainers.image.source="https://github.com/BppleMan/CLIProxyAPI" \
       org.opencontainers.image.revision="${VCS_REF}" \

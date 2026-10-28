@@ -33,7 +33,7 @@ const (
 // large and unknown-size bodies are spooled to disk and retained only for error logs.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if rpmode.Enabled() || logger == nil {
+		if logger == nil || (rpmode.Enabled() && (!rpmode.RequestLoggingEnabled() || !logger.IsEnabled())) {
 			c.Next()
 			return
 		}
@@ -80,8 +80,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
+			if rpmode.RequestLoggingEnabled() {
+				logging.ReportPrivateCaptureFailure()
+			}
 		}
 	}
 }
@@ -261,9 +262,15 @@ func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, logge
 	}
 	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
 		c.Set(logging.APIRequestSourceContextKey, source)
+	} else if rpmode.RequestLoggingEnabled() {
+		c.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
 	}
 	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
 		c.Set(logging.APIResponseSourceContextKey, source)
+	} else if rpmode.RequestLoggingEnabled() {
+		c.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
 	}
 	if !isResponsesWebsocketUpgrade(c.Request) {
 		return
@@ -322,6 +329,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	url := c.Request.URL.Path
 	if maskedQuery != "" {
 		url += "?" + maskedQuery
+	}
+	if rpmode.Enabled() {
+		url = logging.RedactURL(c.Request.URL.RequestURI())
 	}
 
 	// Capture method

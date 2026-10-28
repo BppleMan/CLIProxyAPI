@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -107,10 +108,21 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 	)
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if rpmode.RequestLoggingEnabled() {
+				_ = filepath.WalkDir(filepath.Join(dir, entry.Name()), func(_ string, item os.DirEntry, walkErr error) error {
+					if walkErr == nil && !item.IsDir() && item.Type().IsRegular() {
+						if info, errInfo := item.Info(); errInfo == nil {
+							total += info.Size()
+						}
+					}
+					return nil
+				})
+			}
 			continue
 		}
 		name := entry.Name()
-		if !isLogFileName(name) {
+		eligible := isLogFileName(name)
+		if !eligible && !rpmode.RequestLoggingEnabled() {
 			continue
 		}
 		info, errInfo := entry.Info()
@@ -121,12 +133,14 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 			continue
 		}
 		path := filepath.Join(dir, name)
-		files = append(files, logFile{
-			path:    path,
-			size:    info.Size(),
-			modTime: info.ModTime(),
-		})
 		total += info.Size()
+		if eligible {
+			files = append(files, logFile{
+				path:    path,
+				size:    info.Size(),
+				modTime: info.ModTime(),
+			})
+		}
 	}
 
 	if total <= maxBytes {

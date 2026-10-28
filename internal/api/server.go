@@ -183,7 +183,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Resolve logs directory relative to the configuration file directory.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
-	if !cfg.CommercialMode && !rpmode.Enabled() {
+	if !cfg.CommercialMode && (!rpmode.Enabled() || rpmode.RequestLoggingEnabled()) {
 		if optionState.requestLoggerFactory != nil {
 			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 		}

@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -66,6 +67,8 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
+	info.URL = logging.RedactURL(info.URL)
+	info.Body = logging.RedactPrivateBody(info.Body, info.Headers.Get("Content-Type"))
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
@@ -84,15 +87,19 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 		if errWrite := source.AppendBytes([]byte(builder.String())); errWrite == nil {
 			if len(info.Body) > 0 {
 				if errBody := source.AppendBytes(info.Body); errBody != nil {
+					markPrivateCaptureIncomplete(ginCtx)
 					log.WithError(errBody).Warn("failed to append api request body log part")
 				}
 			} else if errEmpty := source.AppendBytes([]byte("<empty>")); errEmpty != nil {
+				markPrivateCaptureIncomplete(ginCtx)
 				log.WithError(errEmpty).Warn("failed to append empty api request log part")
 			}
 			if errEnd := source.AppendBytes([]byte("\n\n")); errEnd != nil {
+				markPrivateCaptureIncomplete(ginCtx)
 				log.WithError(errEnd).Warn("failed to append api request log terminator")
 			}
 		} else {
+			markPrivateCaptureIncomplete(ginCtx)
 			log.WithError(errWrite).Warn("failed to append api request log part")
 			if len(info.Body) > 0 {
 				builder.WriteString(string(info.Body))
@@ -514,14 +521,25 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 			}
 			return
 		} else {
+			markPrivateCaptureIncomplete(ginCtx)
 			log.WithError(errWrite).Warn("failed to append api response log part")
 			attempt.responseSource = nil
+			if rpmode.RequestLoggingEnabled() {
+				return
+			}
 		}
 	}
 	if attempt.response == nil {
 		attempt.response = &strings.Builder{}
 	}
 	attempt.response.Write(payload)
+}
+
+func markPrivateCaptureIncomplete(ginCtx *gin.Context) {
+	if rpmode.RequestLoggingEnabled() && ginCtx != nil {
+		ginCtx.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
+	}
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
@@ -652,7 +670,7 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			continue
 		}
 		for _, value := range values {
-			masked := util.MaskSensitiveHeaderValue(key, value)
+			masked := logging.RedactHeaderValue(key, value)
 			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
@@ -672,6 +690,9 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 
 	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
 	authValue := strings.TrimSpace(info.AuthValue)
+	if rpmode.Enabled() && authValue != "" {
+		authValue = "[REDACTED]"
+	}
 	switch authType {
 	case "api_key":
 		if authValue != "" {

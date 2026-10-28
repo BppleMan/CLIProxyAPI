@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -75,6 +77,7 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+	incomplete           atomic.Bool
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -95,6 +98,22 @@ func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 	case w.chunkChan <- chunkCopy:
 	default:
 		// Channel is full, skip this chunk to avoid blocking
+		w.MarkIncomplete()
+	}
+}
+
+// MarkIncomplete records a dropped chunk while preserving inference availability.
+func (w *FileStreamingLogWriter) MarkIncomplete() {
+	if rpmode.RequestLoggingEnabled() {
+		w.incomplete.Store(true)
+		ReportPrivateCaptureDrop()
+	}
+}
+
+// MarkCaptureIncomplete marks an already reported upstream capture failure.
+func (w *FileStreamingLogWriter) MarkCaptureIncomplete() {
+	if rpmode.RequestLoggingEnabled() {
+		w.incomplete.Store(true)
 	}
 }
 
@@ -212,6 +231,9 @@ func (w *FileStreamingLogWriter) Close() error {
 
 	select {
 	case errWrite := <-w.errorChan:
+		if rpmode.RequestLoggingEnabled() {
+			ReportPrivateCaptureFailure()
+		}
 		w.cleanupTempFiles()
 		return errWrite
 	default:
@@ -222,14 +244,22 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, _, errOpen := createUniqueLogFile(w.logsDir, w.logFilename)
+	logFile, finishLog, errOpen := openRequestLogFile(w.logsDir, w.logFilename)
 	if errOpen != nil {
+		if rpmode.RequestLoggingEnabled() {
+			ReportPrivateCaptureFailure()
+		}
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
 
 	writeErr := w.writeFinalLog(logFile)
-	if errClose := logFile.Close(); errClose != nil {
+	if w.incomplete.Load() {
+		if _, errMarker := logFile.WriteString("\n=== LOG CAPTURE INCOMPLETE ===\n"); errMarker != nil && writeErr == nil {
+			writeErr = errMarker
+		}
+	}
+	if errClose := finishLog(writeErr); errClose != nil {
 		log.WithError(errClose).Warn("failed to close request log file")
 		if writeErr == nil {
 			writeErr = errClose
