@@ -332,7 +332,8 @@ func (h *Handler) GetPrivateLogStatus(c *gin.Context) {
 		limit = int64(h.cfg.LogsMaxTotalSizeMB) * 1024 * 1024
 	}
 	failures, drops, lastFailure := logging.PrivateCaptureStatus()
-	c.JSON(http.StatusOK, gin.H{"used_bytes": used, "limit_bytes": limit, "capture_failures": failures, "dropped_chunks": drops, "last_failure": lastFailure})
+	total, available, diskOK := privateDiskUsage(h.logDirectory())
+	c.JSON(http.StatusOK, gin.H{"used_bytes": used, "limit_bytes": limit, "disk_total_bytes": total, "disk_available_bytes": available, "disk_stats_available": diskOK, "capture_failures": failures, "dropped_chunks": drops, "last_failure": lastFailure})
 }
 
 func clearPrivateRequestLogs(dir string) error {

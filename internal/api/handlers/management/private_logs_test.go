@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,7 +53,19 @@ func TestPrivateLogsPaginationPreviewAndClear(t *testing.T) {
 		r.ServeHTTP(w, httptest.NewRequest(method, path, nil))
 		return w
 	}
-	w := call("GET", "/requests?limit=1")
+	w := call("GET", "/status")
+	var status struct {
+		UsedBytes          int64  `json:"used_bytes"`
+		DiskAvailableBytes uint64 `json:"disk_available_bytes"`
+		DiskStatsAvailable bool   `json:"disk_stats_available"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &status) != nil || status.UsedBytes < int64(len(content)*2) {
+		t.Fatalf("invalid log status: %d %s", w.Code, w.Body.String())
+	}
+	if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && (!status.DiskStatsAvailable || status.DiskAvailableBytes == 0) {
+		t.Fatal("disk capacity was not reported")
+	}
+	w = call("GET", "/requests?limit=1")
 	var listing struct {
 		Files      []privateLogFile `json:"files"`
 		NextCursor string           `json:"next_cursor"`

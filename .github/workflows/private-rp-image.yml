@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BppleMan/Cli-Proxy-API-Management-Center
-          ref: 56d2aeafaebdc82c84049dc20247e89fb948301e
+          ref: e3b3274467089bacd8fd8a67bbb07bdaf2de1a54
           path: management-panel
       - uses: oven-sh/setup-bun@v2
         with:
