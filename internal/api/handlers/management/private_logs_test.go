@@ -114,6 +114,26 @@ func TestPrivateLogsPaginationPreviewAndClear(t *testing.T) {
 	}
 }
 
+func TestPrivateLogStatusReportsBlockedStorage(t *testing.T) {
+	t.Setenv("CPA_PRIVATE_RP", "1")
+	t.Setenv("CPA_PRIVATE_RP_REQUEST_LOG", "1")
+	privateLogStatusWorker <- struct{}{}
+	defer func() { <-privateLogStatusWorker }()
+	h := &Handler{cfg: &config.Config{LogsMaxTotalSizeMB: 18432}, logDir: t.TempDir()}
+	r := gin.New()
+	r.GET("/status", h.GetPrivateLogStatus)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/status", nil))
+	var status struct {
+		UsageAvailable bool   `json:"usage_available"`
+		DiskAvailable  bool   `json:"disk_stats_available"`
+		Failures       uint64 `json:"capture_failures"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &status) != nil || status.UsageAvailable || status.DiskAvailable || status.Failures == 0 {
+		t.Fatalf("blocked storage was not reported: %s", w.Body.String())
+	}
+}
+
 func TestPrivateLogMediaCanBeDownloaded(t *testing.T) {
 	t.Setenv("CPA_PRIVATE_RP", "1")
 	t.Setenv("CPA_PRIVATE_RP_REQUEST_LOG", "1")

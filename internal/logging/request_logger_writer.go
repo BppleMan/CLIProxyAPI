@@ -65,14 +65,15 @@ func (l *FileRequestLogger) LogRequestWithOptionsAndAllSources(url, method strin
 
 func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline []byte, websocketTimelineSource *FileBodySource, apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	defer cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
+	enabled := l.IsEnabled()
 	url = RedactURL(url)
 	body = RedactPrivateBody(body, http.Header(requestHeaders).Get("Content-Type"))
 
-	if !l.enabled && !force {
+	if !enabled && !force {
 		return nil
 	}
 
-	if l.homeEnabled && l.enabled {
+	if !rpmode.RequestLoggingEnabled() && l.homeEnabled && enabled {
 		responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 		if decompressErr != nil {
 			responseToWrite = response
@@ -109,13 +110,16 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	}
 
 	// Ensure logs directory exists
+	if rpmode.RequestLoggingEnabled() {
+		waitPrivateLogRecovery()
+	}
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	if force && !enabled {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 
@@ -135,6 +139,12 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	if decompressErr != nil {
 		// If decompression fails, continue with original response and annotate the log output.
 		responseToWrite = response
+	}
+	if rpmode.RequestLoggingEnabled() && decompressErr == nil {
+		responseToWrite = RedactPrivateBody(responseToWrite, http.Header(responseHeaders).Get("Content-Type"))
+	} else if rpmode.RequestLoggingEnabled() && decompressErr != nil {
+		ReportPrivateCaptureFailure()
+		responseToWrite = []byte("[compressed response omitted: decompression failed]")
 	}
 
 	logFile, finishLog, errOpen := openRequestLogFile(l.logsDir, filename)
@@ -178,7 +188,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
-	if force && !l.enabled {
+	if force && !enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
@@ -202,16 +212,27 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
 	url = RedactURL(url)
 	body = RedactPrivateBody(body, http.Header(headers).Get("Content-Type"))
-	if !l.enabled {
+	if !l.IsEnabled() {
 		return &NoOpStreamingLogWriter{}, nil
 	}
 
-	if l.homeEnabled {
+	if !rpmode.RequestLoggingEnabled() && l.homeEnabled {
 		client := currentHomeRequestLogClient()
 		if client == nil || !client.HeartbeatOK() {
 			return &NoOpStreamingLogWriter{}, nil
 		}
 		return newHomeStreamingLogWriter(url, method, headers, body, requestID), nil
+	}
+
+	if rpmode.RequestLoggingEnabled() {
+		writer := &FileStreamingLogWriter{
+			logsDir: l.logsDir, logFilename: l.generateFilename(url, requestID),
+			url: url, method: method, timestamp: time.Now(), requestHeaders: cloneHeaders(headers),
+			privateInit: true, privateRequestBody: bytes.Clone(body),
+			chunkChan: make(chan []byte, 100), closeChan: make(chan struct{}), errorChan: make(chan error, 1),
+		}
+		go writer.asyncWriter()
+		return writer, nil
 	}
 
 	// Ensure logs directory exists

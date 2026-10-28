@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,8 @@ import (
 )
 
 const privatePreviewSize = 64 * 1024
+
+var privateLogStatusWorker = make(chan struct{}, 1)
 
 var privateRequestIDPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
@@ -306,34 +309,60 @@ func (h *Handler) GetPrivateLogStatus(c *gin.Context) {
 	if !requirePrivateLogging(c) {
 		return
 	}
-	var used int64
-	err := filepath.WalkDir(h.logDirectory(), func(_ string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if os.IsNotExist(walkErr) {
+	type measurement struct {
+		used             int64
+		total, available uint64
+		diskOK           bool
+		err              error
+	}
+	results := make(chan measurement, 1)
+	started := false
+	select {
+	case privateLogStatusWorker <- struct{}{}:
+		started = true
+		go func() {
+			defer func() { <-privateLogStatusWorker }()
+			var used int64
+			err := filepath.WalkDir(h.logDirectory(), func(_ string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					if os.IsNotExist(walkErr) {
+						return nil
+					}
+					return walkErr
+				}
+				if entry.Type().IsRegular() {
+					info, errInfo := entry.Info()
+					if errInfo != nil {
+						return errInfo
+					}
+					used += info.Size()
+				}
 				return nil
-			}
-			return walkErr
+			})
+			total, available, diskOK := privateDiskUsage(h.logDirectory())
+			results <- measurement{used, total, available, diskOK, err}
+		}()
+	default:
+	}
+	var measured measurement
+	if started {
+		select {
+		case measured = <-results:
+		case <-time.After(2 * time.Second):
+			measured.err = fmt.Errorf("log storage status timed out")
 		}
-		if entry.Type().IsRegular() {
-			info, errInfo := entry.Info()
-			if errInfo != nil {
-				return errInfo
-			}
-			used += info.Size()
-		}
-		return nil
-	})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read log usage"})
-		return
+	} else {
+		measured.err = fmt.Errorf("log storage status is unavailable")
+	}
+	if measured.err != nil {
+		logging.ReportPrivateCaptureFailure()
 	}
 	var limit int64
 	if h.cfg != nil {
 		limit = int64(h.cfg.LogsMaxTotalSizeMB) * 1024 * 1024
 	}
 	failures, drops, lastFailure := logging.PrivateCaptureStatus()
-	total, available, diskOK := privateDiskUsage(h.logDirectory())
-	c.JSON(http.StatusOK, gin.H{"used_bytes": used, "limit_bytes": limit, "disk_total_bytes": total, "disk_available_bytes": available, "disk_stats_available": diskOK, "capture_failures": failures, "dropped_chunks": drops, "last_failure": lastFailure})
+	c.JSON(http.StatusOK, gin.H{"used_bytes": measured.used, "usage_available": measured.err == nil, "limit_bytes": limit, "disk_total_bytes": measured.total, "disk_available_bytes": measured.available, "disk_stats_available": measured.err == nil && measured.diskOK, "capture_failures": failures, "dropped_chunks": drops, "last_failure": lastFailure})
 }
 
 func clearPrivateRequestLogs(dir string) error {

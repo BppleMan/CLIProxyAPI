@@ -4,7 +4,43 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
+
+var privateRecoveryMu sync.RWMutex
+var privateRecoveryDone <-chan struct{}
+
+// StartPrivateLogRecovery does not delay serving inference when storage hangs.
+// Background log writers wait until recovery finishes to avoid touching active files.
+func StartPrivateLogRecovery(dir string) {
+	done := make(chan struct{})
+	privateRecoveryMu.Lock()
+	privateRecoveryDone = done
+	privateRecoveryMu.Unlock()
+	go func() {
+		defer close(done)
+		if err := RecoverPrivateLogOrphans(dir); err != nil {
+			ReportPrivateCaptureFailure()
+		}
+	}()
+	go func() {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			ReportPrivateCaptureFailure()
+		}
+	}()
+}
+
+func waitPrivateLogRecovery() {
+	privateRecoveryMu.RLock()
+	done := privateRecoveryDone
+	privateRecoveryMu.RUnlock()
+	if done != nil {
+		<-done
+	}
+}
 
 // RecoverPrivateLogOrphans runs before serving requests in a single-writer process.
 func RecoverPrivateLogOrphans(dir string) error {

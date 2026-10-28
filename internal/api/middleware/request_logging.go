@@ -12,15 +12,21 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
+
+// Bound background capture when a log filesystem stops responding.
+var privateCaptureSlots = make(chan struct{}, 16)
+var privateCaptureWait sync.WaitGroup
 
 const (
 	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20  // 1 MiB
@@ -47,6 +53,24 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if !shouldLogRequest(path) {
 			c.Next()
 			return
+		}
+
+		privateCapture := rpmode.RequestLoggingEnabled()
+		transferred := false
+		if privateCapture {
+			select {
+			case privateCaptureSlots <- struct{}{}:
+			default:
+				c.Set(logging.PrivateCaptureDisabledContextKey, true)
+				logging.ReportPrivateCaptureFailure()
+				c.Next()
+				return
+			}
+			defer func() {
+				if !transferred {
+					<-privateCaptureSlots
+				}
+			}()
 		}
 
 		loggerEnabled := logger.IsEnabled()
@@ -77,6 +101,21 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Process the request
 		c.Next()
+		if privateCapture {
+			helps.FinishPrivateResponseCapture(c)
+			wrapper.prepareDetached()
+			contextCopy := c.Copy()
+			transferred = true
+			privateCaptureWait.Add(1)
+			go func() {
+				defer privateCaptureWait.Done()
+				defer func() { <-privateCaptureSlots }()
+				if errFinalize := wrapper.Finalize(contextCopy); errFinalize != nil {
+					logging.ReportPrivateCaptureFailure()
+				}
+			}()
+			return
+		}
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {

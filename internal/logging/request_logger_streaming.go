@@ -34,7 +34,9 @@ type FileStreamingLogWriter struct {
 	requestHeaders map[string][]string
 
 	// requestBodyPath is a temporary file path holding the request body.
-	requestBodyPath string
+	requestBodyPath    string
+	privateInit        bool
+	privateRequestBody []byte
 
 	// responseBodyPath is a temporary file path holding the streaming response body.
 	responseBodyPath string
@@ -89,16 +91,18 @@ func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 		return
 	}
 
-	// Make a copy of the chunk to avoid data races
-	chunkCopy := make([]byte, len(chunk))
-	copy(chunkCopy, chunk)
-
-	// Non-blocking send
-	select {
-	case w.chunkChan <- chunkCopy:
-	default:
-		// Channel is full, skip this chunk to avoid blocking
-		w.MarkIncomplete()
+	for len(chunk) > 0 {
+		n := len(chunk)
+		if n > 64*1024 {
+			n = 64 * 1024
+		}
+		select {
+		case w.chunkChan <- append([]byte(nil), chunk[:n]...):
+			chunk = chunk[n:]
+		default:
+			w.MarkIncomplete()
+			return
+		}
 	}
 }
 
@@ -274,10 +278,19 @@ func (w *FileStreamingLogWriter) Close() error {
 // It continuously reads chunks from the channel and appends them to a temp file for later assembly.
 func (w *FileStreamingLogWriter) asyncWriter() {
 	defer close(w.closeChan)
+	if w.privateInit {
+		if err := w.initPrivateFiles(); err != nil {
+			ReportPrivateCaptureFailure()
+			select {
+			case w.errorChan <- err:
+			default:
+			}
+		}
+	}
 
-	for chunk := range w.chunkChan {
+	writeChunk := func(chunk []byte) {
 		if w.responseBodyFile == nil {
-			continue
+			return
 		}
 		if _, errWrite := w.responseBodyFile.Write(chunk); errWrite != nil {
 			select {
@@ -293,6 +306,17 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 			w.responseBodyFile = nil
 		}
 	}
+	var redactor PrivateFrameRedactor
+	for chunk := range w.chunkChan {
+		if w.privateInit {
+			redactor.Feed(chunk, writeChunk)
+		} else {
+			writeChunk(chunk)
+		}
+	}
+	if w.privateInit {
+		redactor.Finish(writeChunk)
+	}
 
 	if w.responseBodyFile == nil {
 		return
@@ -304,6 +328,28 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 		}
 	}
 	w.responseBodyFile = nil
+}
+
+// initPrivateFiles is called only by the background writer.
+func (w *FileStreamingLogWriter) initPrivateFiles() error {
+	waitPrivateLogRecovery()
+	logger := &FileRequestLogger{logsDir: w.logsDir}
+	if err := logger.ensureLogsDir(); err != nil {
+		return err
+	}
+	path, err := logger.writeRequestBodyTempFile(w.privateRequestBody)
+	w.privateRequestBody = nil
+	if err != nil {
+		return err
+	}
+	w.requestBodyPath = path
+	file, err := os.CreateTemp(w.logsDir, "response-body-*.tmp")
+	if err != nil {
+		return err
+	}
+	w.responseBodyFile = file
+	w.responseBodyPath = file.Name()
+	return nil
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {

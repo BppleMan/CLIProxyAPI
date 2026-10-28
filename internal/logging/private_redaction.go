@@ -44,6 +44,13 @@ func RedactPrivateBody(body []byte, contentType string) []byte {
 		return []byte("[invalid content type; request body omitted]")
 	}
 	switch mediaType {
+	case "text/event-stream":
+		var redactor PrivateFrameRedactor
+		var output bytes.Buffer
+		emit := func(p []byte) { _, _ = output.Write(p) }
+		redactor.Feed(body, emit)
+		redactor.Finish(emit)
+		return output.Bytes()
 	case "application/x-www-form-urlencoded":
 		values, err := url.ParseQuery(string(body))
 		if err != nil {
@@ -64,7 +71,9 @@ func RedactPrivateBody(body []byte, contentType string) []byte {
 		}
 		return redacted
 	default:
-		if (mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")) && !gjson.ValidBytes(body) {
+		trimmed := bytes.TrimSpace(body)
+		looksLikeJSON := mediaType == "" && len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+		if (mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") || looksLikeJSON) && !gjson.ValidBytes(body) {
 			ReportPrivateCaptureFailure()
 			return []byte("[invalid JSON body omitted]")
 		}
@@ -171,7 +180,7 @@ func RedactCredentialFields(body []byte) []byte {
 	var visit func(gjson.Result)
 	visit = func(value gjson.Result) {
 		value.ForEach(func(key, child gjson.Result) bool {
-			if key.Type == gjson.String && !strings.EqualFold(key.String(), "key") && sensitiveCredentialName(key.String()) {
+			if key.Type == gjson.String && sensitiveCredentialName(key.String()) {
 				if child.Index >= 0 && child.Index+len(child.Raw) <= len(body) {
 					edits = append(edits, jsonRedaction{child.Index, child.Index + len(child.Raw)})
 				}

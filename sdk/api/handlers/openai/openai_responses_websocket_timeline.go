@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -34,6 +35,7 @@ type websocketTimelineLog struct {
 
 	currentPart       io.WriteCloser
 	currentPartHasLog bool
+	incomplete        bool
 }
 
 func newWebsocketTimelineLog(enabled bool, source *requestlogging.FileBodySource) *websocketTimelineLog {
@@ -72,7 +74,7 @@ func websocketTimelineSourceFromContext(c *gin.Context) *requestlogging.FileBody
 }
 
 func (l *websocketTimelineLog) BeginRequest() {
-	if l == nil || !l.enabled || l.source == nil {
+	if l == nil || !l.enabled || l.source == nil || rpmode.RequestLoggingEnabled() {
 		return
 	}
 	l.mu.Lock()
@@ -97,11 +99,24 @@ func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestam
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if rpmode.RequestLoggingEnabled() {
+		if eventType == "disconnect" {
+			payload = []byte("details omitted")
+		} else {
+			payload = requestlogging.RedactPrivateFrame(payload)
+		}
+	}
 	data := formatWebsocketTimelineEvent(eventType, payload, timestamp)
 	if len(data) == 0 {
 		return
 	}
 	if l.source != nil {
+		if rpmode.RequestLoggingEnabled() {
+			if err := l.source.AppendPart(data); err != nil {
+				l.incomplete = true
+			}
+			return
+		}
 		if l.currentPart == nil {
 			l.beginRequestLocked()
 		}
@@ -128,6 +143,13 @@ func (l *websocketTimelineLog) SetContext(c *gin.Context) {
 	defer l.mu.Unlock()
 	l.closeCurrentPart()
 	if l.source != nil {
+		if rpmode.RequestLoggingEnabled() {
+			if l.incomplete {
+				c.Set(requestlogging.PrivateCaptureIncompleteContextKey, true)
+			}
+			c.Set(requestlogging.WebsocketTimelineSourceContextKey, l.source)
+			return
+		}
 		if l.source.HasPayload() {
 			c.Set(requestlogging.WebsocketTimelineSourceContextKey, l.source)
 			return

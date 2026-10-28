@@ -635,9 +635,7 @@ func main() {
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if rpmode.RequestLoggingEnabled() {
-		if errRecovery := logging.RecoverPrivateLogOrphans(logging.ResolveLogDirectory(cfg)); errRecovery != nil {
-			logging.ReportPrivateCaptureFailure()
-		}
+		logging.StartPrivateLogRecovery(logging.ResolveLogDirectory(cfg))
 	}
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)

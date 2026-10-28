@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BppleMan/Cli-Proxy-API-Management-Center
-          ref: e3b3274467089bacd8fd8a67bbb07bdaf2de1a54
+          ref: 455b1ad8cb21ad2cc576214a3c6d84b0f908c645
           path: management-panel
       - uses: oven-sh/setup-bun@v2
         with:
@@ -47,6 +47,7 @@ jobs:
           go test ./internal/registry ./internal/translator/antigravity/gemini -count=1
           go test ./cmd/private-rp-logging-config -count=1
           go test ./internal/logging ./internal/api/middleware ./internal/api/handlers/management ./internal/runtime/executor/helps -run TestPrivate -count=1
+          go test ./sdk/api/handlers/openai -run TestPrivateWebsocket -count=1
       - name: Build Linux binary with source revision
         env:
           CGO_ENABLED: '0'

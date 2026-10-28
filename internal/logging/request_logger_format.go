@@ -15,6 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -352,6 +353,9 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 		trailingNewlines := 1
 		if apiResponseErrors[i].Error != nil {
 			errText := apiResponseErrors[i].Error.Error()
+			if rpmode.RequestLoggingEnabled() {
+				errText = SafeErrorDiagnostic(apiResponseErrors[i].Error)
+			}
 			if _, errWrite := io.WriteString(w, errText); errWrite != nil {
 				return errWrite
 			}
