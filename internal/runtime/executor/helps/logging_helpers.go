@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -55,10 +56,15 @@ type upstreamAttempt struct {
 	prevWasSSEEvent      bool
 	errorWritten         bool
 	trailingNewlines     int
+	privateRedactor      *logging.PrivateFrameRedactor
 }
 
 func requestLogCaptureEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.RequestLog && !cfg.CommercialMode
+}
+
+func privateCaptureDisabled(ginCtx *gin.Context) bool {
+	return rpmode.RequestLoggingEnabled() && ginCtx.GetBool(logging.PrivateCaptureDisabledContextKey)
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -67,15 +73,20 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
+	info.URL = logging.RedactURL(info.URL)
+	info.Body = logging.RedactPrivateBody(info.Body, info.Headers.Get("Content-Type"))
 	if !cfg.RequestLog {
 		deferAPIRequest(ginCtx, info)
 		return
 	}
 
 	attempts := getAttempts(ginCtx)
+	if rpmode.RequestLoggingEnabled() && len(attempts) > 0 {
+		finishPrivateAttempt(ginCtx, attempts, attempts[len(attempts)-1])
+	}
 	index := len(attempts) + 1
 	builder := newAPIRequestLogBuilder(index, info, time.Now())
 
@@ -84,23 +95,29 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 		if errWrite := source.AppendBytes([]byte(builder.String())); errWrite == nil {
 			if len(info.Body) > 0 {
 				if errBody := source.AppendBytes(info.Body); errBody != nil {
+					markPrivateCaptureIncomplete(ginCtx)
 					log.WithError(errBody).Warn("failed to append api request body log part")
 				}
 			} else if errEmpty := source.AppendBytes([]byte("<empty>")); errEmpty != nil {
+				markPrivateCaptureIncomplete(ginCtx)
 				log.WithError(errEmpty).Warn("failed to append empty api request log part")
 			}
 			if errEnd := source.AppendBytes([]byte("\n\n")); errEnd != nil {
+				markPrivateCaptureIncomplete(ginCtx)
 				log.WithError(errEnd).Warn("failed to append api request log terminator")
 			}
 		} else {
+			markPrivateCaptureIncomplete(ginCtx)
 			log.WithError(errWrite).Warn("failed to append api request log part")
-			if len(info.Body) > 0 {
-				builder.WriteString(string(info.Body))
-			} else {
-				builder.WriteString("<empty>")
+			if !rpmode.RequestLoggingEnabled() {
+				if len(info.Body) > 0 {
+					builder.WriteString(string(info.Body))
+				} else {
+					builder.WriteString("<empty>")
+				}
+				builder.WriteString("\n\n")
+				requestText = builder.String()
 			}
-			builder.WriteString("\n\n")
-			requestText = builder.String()
 		}
 	} else {
 		if len(info.Body) > 0 {
@@ -194,7 +211,7 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -222,7 +239,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -235,7 +252,11 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if attempt.errorWritten {
 		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	}
-	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Error: %s\n", err.Error())))
+	message := err.Error()
+	if rpmode.RequestLoggingEnabled() {
+		message = "details omitted"
+	}
+	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Error: %s\n", message)))
 	attempt.errorWritten = true
 
 	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
@@ -246,16 +267,32 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
-	data := bytes.TrimSpace(chunk)
-	if len(data) == 0 {
+	if len(chunk) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
+	if rpmode.RequestLoggingEnabled() {
+		if attempt.privateRedactor == nil {
+			attempt.privateRedactor = &logging.PrivateFrameRedactor{}
+		}
+		attempt.privateRedactor.Feed(chunk, func(frame []byte) {
+			appendAPIResponseFrame(ginCtx, attempts, attempt, frame)
+		})
+		return
+	}
+	appendAPIResponseFrame(ginCtx, attempts, attempt, chunk)
+}
+
+func appendAPIResponseFrame(ginCtx *gin.Context, attempts []*upstreamAttempt, attempt *upstreamAttempt, chunk []byte) {
+	data := bytes.TrimSpace(chunk)
+	if len(data) == 0 {
+		return
+	}
 
 	if !attempt.headersWritten {
 		builder := &strings.Builder{}
@@ -285,14 +322,37 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
 }
 
+func finishPrivateAttempt(ginCtx *gin.Context, attempts []*upstreamAttempt, attempt *upstreamAttempt) {
+	if attempt != nil && attempt.privateRedactor != nil {
+		attempt.privateRedactor.Finish(func(frame []byte) {
+			appendAPIResponseFrame(ginCtx, attempts, attempt, frame)
+		})
+	}
+}
+
+// FinishPrivateResponseCapture flushes the final unterminated frame before Gin context reuse.
+func FinishPrivateResponseCapture(ginCtx *gin.Context) {
+	if ginCtx == nil || !rpmode.RequestLoggingEnabled() || privateCaptureDisabled(ginCtx) {
+		return
+	}
+	attempts := getAttempts(ginCtx)
+	for _, attempt := range attempts {
+		finishPrivateAttempt(ginCtx, attempts, attempt)
+	}
+}
+
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
+	}
+	if rpmode.RequestLoggingEnabled() {
+		info.URL = logging.RedactURL(info.URL)
+		info.Body = logging.RedactPrivateFrame(info.Body)
 	}
 
 	builder := &strings.Builder{}
@@ -324,7 +384,7 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 
@@ -348,7 +408,7 @@ func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config,
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 
@@ -386,8 +446,11 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
+	}
+	if rpmode.RequestLoggingEnabled() {
+		data = logging.RedactPrivateFrame(data)
 	}
 	markAPIResponseTimestamp(ginCtx)
 
@@ -413,7 +476,7 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	if ginCtx == nil || privateCaptureDisabled(ginCtx) {
 		return
 	}
 	markAPIResponseTimestamp(ginCtx)
@@ -424,7 +487,11 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 	if trimmed := strings.TrimSpace(stage); trimmed != "" {
 		builder.WriteString(fmt.Sprintf("Stage: %s\n", trimmed))
 	}
-	builder.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	message := err.Error()
+	if rpmode.RequestLoggingEnabled() {
+		message = "details omitted"
+	}
+	builder.WriteString(fmt.Sprintf("Error: %s\n", message))
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
@@ -514,14 +581,25 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 			}
 			return
 		} else {
+			markPrivateCaptureIncomplete(ginCtx)
 			log.WithError(errWrite).Warn("failed to append api response log part")
 			attempt.responseSource = nil
+			if rpmode.RequestLoggingEnabled() {
+				return
+			}
 		}
 	}
 	if attempt.response == nil {
 		attempt.response = &strings.Builder{}
 	}
 	attempt.response.Write(payload)
+}
+
+func markPrivateCaptureIncomplete(ginCtx *gin.Context) {
+	if rpmode.RequestLoggingEnabled() && ginCtx != nil {
+		ginCtx.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
+	}
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
@@ -587,7 +665,11 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 		if errAppend := source.AppendPart(data); errAppend == nil {
 			return
 		} else {
+			markPrivateCaptureIncomplete(ginCtx)
 			log.WithError(errAppend).Warn("failed to append api websocket timeline log part")
+			if rpmode.RequestLoggingEnabled() {
+				return
+			}
 		}
 	}
 	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
@@ -652,7 +734,7 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			continue
 		}
 		for _, value := range values {
-			masked := util.MaskSensitiveHeaderValue(key, value)
+			masked := logging.RedactHeaderValue(key, value)
 			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
@@ -672,6 +754,9 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 
 	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
 	authValue := strings.TrimSpace(info.AuthValue)
+	if rpmode.Enabled() && authValue != "" {
+		authValue = "[REDACTED]"
+	}
 	switch authType {
 	case "api_key":
 		if authValue != "" {

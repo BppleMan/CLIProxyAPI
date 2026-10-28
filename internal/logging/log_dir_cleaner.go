@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -52,6 +53,9 @@ func runLogDirCleaner(ctx context.Context, logDir string, maxBytes int64, protec
 	cleanOnce := func() {
 		deleted, errClean := enforceLogDirSizeLimit(logDir, maxBytes, protectedPath)
 		if errClean != nil {
+			if rpmode.RequestLoggingEnabled() {
+				ReportPrivateCaptureFailure()
+			}
 			log.WithError(errClean).Warn("logging: failed to enforce log directory size limit")
 			return
 		}
@@ -107,26 +111,50 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 	)
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if rpmode.RequestLoggingEnabled() {
+				errWalk := filepath.WalkDir(filepath.Join(dir, entry.Name()), func(_ string, item os.DirEntry, walkErr error) error {
+					if walkErr != nil {
+						return walkErr
+					}
+					if !item.IsDir() && item.Type().IsRegular() {
+						info, errInfo := item.Info()
+						if errInfo != nil {
+							return errInfo
+						}
+						total += info.Size()
+					}
+					return nil
+				})
+				if errWalk != nil {
+					return 0, errWalk
+				}
+			}
 			continue
 		}
 		name := entry.Name()
-		if !isLogFileName(name) {
+		eligible := isLogFileName(name)
+		if !eligible && !rpmode.RequestLoggingEnabled() {
 			continue
 		}
 		info, errInfo := entry.Info()
 		if errInfo != nil {
+			if rpmode.RequestLoggingEnabled() {
+				return 0, errInfo
+			}
 			continue
 		}
 		if !info.Mode().IsRegular() {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		files = append(files, logFile{
-			path:    path,
-			size:    info.Size(),
-			modTime: info.ModTime(),
-		})
 		total += info.Size()
+		if eligible {
+			files = append(files, logFile{
+				path:    path,
+				size:    info.Size(),
+				modTime: info.ModTime(),
+			})
+		}
 	}
 
 	if total <= maxBytes {

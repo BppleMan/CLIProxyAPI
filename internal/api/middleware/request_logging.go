@@ -12,15 +12,21 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
+
+// Bound background capture when a log filesystem stops responding.
+var privateCaptureSlots = make(chan struct{}, 16)
+var privateCaptureWait sync.WaitGroup
 
 const (
 	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20  // 1 MiB
@@ -33,7 +39,7 @@ const (
 // large and unknown-size bodies are spooled to disk and retained only for error logs.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if rpmode.Enabled() || logger == nil {
+		if logger == nil || (rpmode.Enabled() && (!rpmode.RequestLoggingEnabled() || !logger.IsEnabled())) {
 			c.Next()
 			return
 		}
@@ -47,6 +53,24 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if !shouldLogRequest(path) {
 			c.Next()
 			return
+		}
+
+		privateCapture := rpmode.RequestLoggingEnabled()
+		transferred := false
+		if privateCapture {
+			select {
+			case privateCaptureSlots <- struct{}{}:
+			default:
+				c.Set(logging.PrivateCaptureDisabledContextKey, true)
+				logging.ReportPrivateCaptureFailure()
+				c.Next()
+				return
+			}
+			defer func() {
+				if !transferred {
+					<-privateCaptureSlots
+				}
+			}()
 		}
 
 		loggerEnabled := logger.IsEnabled()
@@ -77,11 +101,27 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Process the request
 		c.Next()
+		if privateCapture {
+			helps.FinishPrivateResponseCapture(c)
+			wrapper.prepareDetached()
+			contextCopy := c.Copy()
+			transferred = true
+			privateCaptureWait.Add(1)
+			go func() {
+				defer privateCaptureWait.Done()
+				defer func() { <-privateCaptureSlots }()
+				if errFinalize := wrapper.Finalize(contextCopy); errFinalize != nil {
+					logging.ReportPrivateCaptureFailure()
+				}
+			}()
+			return
+		}
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
+			if rpmode.RequestLoggingEnabled() {
+				logging.ReportPrivateCaptureFailure()
+			}
 		}
 	}
 }
@@ -261,9 +301,15 @@ func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, logge
 	}
 	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
 		c.Set(logging.APIRequestSourceContextKey, source)
+	} else if rpmode.RequestLoggingEnabled() {
+		c.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
 	}
 	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
 		c.Set(logging.APIResponseSourceContextKey, source)
+	} else if rpmode.RequestLoggingEnabled() {
+		c.Set(logging.PrivateCaptureIncompleteContextKey, true)
+		logging.ReportPrivateCaptureFailure()
 	}
 	if !isResponsesWebsocketUpgrade(c.Request) {
 		return
@@ -322,6 +368,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	url := c.Request.URL.Path
 	if maskedQuery != "" {
 		url += "?" + maskedQuery
+	}
+	if rpmode.Enabled() {
+		url = logging.RedactURL(c.Request.URL.RequestURI())
 	}
 
 	// Capture method

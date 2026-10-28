@@ -19,13 +19,14 @@ import (
 )
 
 var (
-	setupOnce      sync.Once
-	writerMu       sync.RWMutex
-	consoleMu      sync.Mutex
-	logWriter      *lumberjack.Logger
-	ginInfoWriter  *io.PipeWriter
-	ginErrorWriter *io.PipeWriter
-	consoleWriter  io.Writer = os.Stderr
+	setupOnce        sync.Once
+	writerMu         sync.RWMutex
+	consoleMu        sync.Mutex
+	logWriter        *lumberjack.Logger
+	privateLogWriter *privateAsyncLogWriter
+	ginInfoWriter    *io.PipeWriter
+	ginErrorWriter   *io.PipeWriter
+	consoleWriter    io.Writer = os.Stderr
 )
 
 func init() {
@@ -194,6 +195,10 @@ func ResolveLogDirectory(cfg *config.Config) string {
 	if base := util.WritablePath(); base != "" {
 		return filepath.Join(base, "logs")
 	}
+	if rpmode.RequestLoggingEnabled() {
+		// Never fall back into the OAuth volume when the dedicated log mount is unavailable.
+		return logDir
+	}
 	if cfg == nil {
 		return logDir
 	}
@@ -222,27 +227,48 @@ func ConfigureLogOutput(cfg *config.Config) error {
 
 	protectedPath := ""
 	if cfg.LoggingToFile {
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
-			return fmt.Errorf("logging: failed to create log directory: %w", err)
-		}
-		if logWriter != nil {
-			_ = logWriter.Close()
+		private := rpmode.RequestLoggingEnabled()
+		if !private {
+			if err := os.MkdirAll(logDir, 0o755); err != nil {
+				return fmt.Errorf("logging: failed to create log directory: %w", err)
+			}
 		}
 		protectedPath = filepath.Join(logDir, "main.log")
-		logWriter = &lumberjack.Logger{
+		next := &lumberjack.Logger{
 			Filename:   protectedPath,
 			MaxSize:    10,
 			MaxBackups: 0,
 			MaxAge:     0,
 			Compress:   false,
 		}
-		log.SetOutput(logWriter)
-	} else {
-		if logWriter != nil {
-			_ = logWriter.Close()
-			logWriter = nil
+		oldWriter, oldPrivate := logWriter, privateLogWriter
+		privateLogWriter = nil
+		logWriter = next
+		if private {
+			privateLogWriter = newPrivateAsyncLogWriter(next, func() error { return os.MkdirAll(logDir, 0o755) })
+			if privateLogWriter == nil {
+				log.SetOutput(io.Discard)
+				logWriter = nil
+			} else {
+				log.SetOutput(privateLogWriter)
+			}
+		} else {
+			log.SetOutput(next)
 		}
+		if oldPrivate != nil {
+			oldPrivate.stop()
+		} else if oldWriter != nil {
+			_ = oldWriter.Close()
+		}
+	} else {
 		log.SetOutput(os.Stdout)
+		if privateLogWriter != nil {
+			privateLogWriter.stop()
+			privateLogWriter = nil
+		} else if logWriter != nil {
+			_ = logWriter.Close()
+		}
+		logWriter = nil
 	}
 
 	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
@@ -255,7 +281,11 @@ func closeLogOutputs() {
 
 	stopLogDirCleanerLocked()
 
-	if logWriter != nil {
+	if privateLogWriter != nil {
+		privateLogWriter.stop()
+		privateLogWriter = nil
+		logWriter = nil
+	} else if logWriter != nil {
 		_ = logWriter.Close()
 		logWriter = nil
 	}

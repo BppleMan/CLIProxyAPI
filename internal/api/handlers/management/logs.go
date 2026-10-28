@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 )
 
 const (
@@ -150,6 +151,12 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
+	}
+	if v8, _ := c.Get(ConfigV8ContextKey); v8 == true && rpmode.RequestLoggingEnabled() {
+		if err := clearPrivateRequestLogs(dir); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear request logs"})
+			return
+		}
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -1314,6 +1321,11 @@ func parseLimit(raw string) (int, error) {
 func parseTimestamp(line string) int64 {
 	if strings.HasPrefix(line, "[") {
 		line = line[1:]
+	}
+	if first, _, ok := strings.Cut(line, " "); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, first); err == nil {
+			return parsed.Unix()
+		}
 	}
 	if len(line) < 19 {
 		return 0

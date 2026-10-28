@@ -32,6 +32,7 @@ auths/*
 docs/*
 !docs/management-api-v8.md
 !docs/private-rp.md
+!docs/private-rp-local-logging.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

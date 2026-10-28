@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -63,12 +65,15 @@ func (l *FileRequestLogger) LogRequestWithOptionsAndAllSources(url, method strin
 
 func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline []byte, websocketTimelineSource *FileBodySource, apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	defer cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
+	enabled := l.IsEnabled()
+	url = RedactURL(url)
+	body = RedactPrivateBody(body, http.Header(requestHeaders).Get("Content-Type"))
 
-	if !l.enabled && !force {
+	if !enabled && !force {
 		return nil
 	}
 
-	if l.homeEnabled && l.enabled {
+	if !rpmode.RequestLoggingEnabled() && l.homeEnabled && enabled {
 		responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 		if decompressErr != nil {
 			responseToWrite = response
@@ -105,13 +110,16 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 	}
 
 	// Ensure logs directory exists
+	if rpmode.RequestLoggingEnabled() {
+		waitPrivateLogRecovery()
+	}
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	if force && !enabled {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 
@@ -132,9 +140,18 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		// If decompression fails, continue with original response and annotate the log output.
 		responseToWrite = response
 	}
+	if rpmode.RequestLoggingEnabled() && decompressErr == nil {
+		responseToWrite = RedactPrivateBody(responseToWrite, http.Header(responseHeaders).Get("Content-Type"))
+	} else if rpmode.RequestLoggingEnabled() && decompressErr != nil {
+		ReportPrivateCaptureFailure()
+		responseToWrite = []byte("[compressed response omitted: decompression failed]")
+	}
 
-	logFile, _, errOpen := createUniqueLogFile(l.logsDir, filename)
+	logFile, finishLog, errOpen := openRequestLogFile(l.logsDir, filename)
 	if errOpen != nil {
+		if rpmode.RequestLoggingEnabled() {
+			ReportPrivateCaptureFailure()
+		}
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
 
@@ -161,7 +178,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		requestTimestamp,
 		apiResponseTimestamp,
 	)
-	if errClose := logFile.Close(); errClose != nil {
+	if errClose := finishLog(writeErr); errClose != nil {
 		log.WithError(errClose).Warn("failed to close request log file")
 		if writeErr == nil {
 			return errClose
@@ -171,7 +188,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
-	if force && !l.enabled {
+	if force && !enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
@@ -193,16 +210,29 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
-	if !l.enabled {
+	url = RedactURL(url)
+	body = RedactPrivateBody(body, http.Header(headers).Get("Content-Type"))
+	if !l.IsEnabled() {
 		return &NoOpStreamingLogWriter{}, nil
 	}
 
-	if l.homeEnabled {
+	if !rpmode.RequestLoggingEnabled() && l.homeEnabled {
 		client := currentHomeRequestLogClient()
 		if client == nil || !client.HeartbeatOK() {
 			return &NoOpStreamingLogWriter{}, nil
 		}
 		return newHomeStreamingLogWriter(url, method, headers, body, requestID), nil
+	}
+
+	if rpmode.RequestLoggingEnabled() {
+		writer := &FileStreamingLogWriter{
+			logsDir: l.logsDir, logFilename: l.generateFilename(url, requestID),
+			url: url, method: method, timestamp: time.Now(), requestHeaders: cloneHeaders(headers),
+			privateInit: true, privateRequestBody: bytes.Clone(body),
+			chunkChan: make(chan []byte, 100), closeChan: make(chan struct{}), errorChan: make(chan error, 1),
+		}
+		go writer.asyncWriter()
+		return writer, nil
 	}
 
 	// Ensure logs directory exists
@@ -300,13 +330,61 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 	// Use request ID if provided, otherwise use sequential ID
 	var idPart string
 	if len(requestID) > 0 && requestID[0] != "" {
-		idPart = ShortRequestID(requestID[0])
+		if rpmode.RequestLoggingEnabled() {
+			idPart = l.sanitizeForFilename(requestID[0])
+		} else {
+			idPart = ShortRequestID(requestID[0])
+		}
 	} else {
 		id := requestLogID.Add(1)
 		idPart = fmt.Sprintf("%d", id)
 	}
 
 	return fmt.Sprintf("%s-%s-%s.log", sanitized, timestamp, idPart)
+}
+
+// openRequestLogFile publishes private request logs only after finalization.
+func openRequestLogFile(dir, filename string) (*os.File, func(error) error, error) {
+	if !rpmode.RequestLoggingEnabled() {
+		file, _, err := createUniqueLogFile(dir, filename)
+		if err != nil {
+			return nil, nil, err
+		}
+		return file, func(_ error) error { return file.Close() }, nil
+	}
+	file, err := os.CreateTemp(dir, ".request-active-*.tmp")
+	if err != nil {
+		return nil, nil, err
+	}
+	tempPath := file.Name()
+	finish := func(writeErr error) error {
+		defer func() { _ = os.Remove(tempPath) }()
+		if writeErr != nil {
+			ReportPrivateCaptureFailure()
+			_, _ = file.WriteString("\n=== LOG CAPTURE INCOMPLETE ===\n")
+		}
+		if errClose := file.Close(); errClose != nil {
+			ReportPrivateCaptureFailure()
+			return errClose
+		}
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		for seq := 0; seq <= 1000; seq++ {
+			name := filename
+			if seq > 0 {
+				name = fmt.Sprintf("%s_%d%s", base, seq, ext)
+			}
+			if errLink := os.Link(tempPath, filepath.Join(dir, name)); errLink == nil {
+				return nil
+			} else if !os.IsExist(errLink) {
+				ReportPrivateCaptureFailure()
+				return errLink
+			}
+		}
+		ReportPrivateCaptureFailure()
+		return fmt.Errorf("too many conflicting request log files")
+	}
+	return file, finish, nil
 }
 
 // createUniqueLogFile atomically opens a unique log file within dir. If a file with filename already exists,

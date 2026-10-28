@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rpmode"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -17,6 +18,7 @@ type FileBodySource struct {
 	dir     string
 	paths   []string
 	cleaned bool
+	private *privateAsyncSource
 }
 
 // NewFileBodySourceInDir creates a temp-backed source under baseDir.
@@ -26,6 +28,13 @@ func NewFileBodySourceInDir(baseDir string, prefix string) (*FileBodySource, err
 	if baseDir == "" {
 		return nil, fmt.Errorf("base directory is required")
 	}
+	if rpmode.RequestLoggingEnabled() {
+		return &FileBodySource{private: newPrivateAsyncSource(baseDir, prefix)}, nil
+	}
+	return newDiskFileBodySource(baseDir, prefix)
+}
+
+func newDiskFileBodySource(baseDir string, prefix string) (*FileBodySource, error) {
 	if errMkdir := os.MkdirAll(baseDir, 0755); errMkdir != nil {
 		return nil, errMkdir
 	}
@@ -68,6 +77,9 @@ func (s *FileBodySource) CreatePart(prefix string) (*os.File, error) {
 	if s == nil {
 		return nil, fmt.Errorf("file body source is nil")
 	}
+	if s.private != nil {
+		return nil, fmt.Errorf("direct private log part creation is unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cleaned {
@@ -91,6 +103,16 @@ func (s *FileBodySource) AppendPart(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if s.private != nil {
+		s.private.partMu.Lock()
+		defer s.private.partMu.Unlock()
+		if s.private.hasData.Load() {
+			if err := s.private.append([]byte("\n")); err != nil {
+				return err
+			}
+		}
+		return s.private.append(data)
+	}
 	file, errCreate := s.CreatePart("part")
 	if errCreate != nil {
 		return errCreate
@@ -111,6 +133,9 @@ func (s *FileBodySource) AppendBytes(data []byte) error {
 	}
 	if len(data) == 0 {
 		return nil
+	}
+	if s.private != nil {
+		return s.private.append(data)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,6 +174,9 @@ func (s *FileBodySource) HasPayload() bool {
 	if s == nil {
 		return false
 	}
+	if s.private != nil {
+		return s.private.hasData.Load()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.paths) > 0 && !s.cleaned
@@ -158,6 +186,13 @@ func (s *FileBodySource) HasPayload() bool {
 func (s *FileBodySource) Paths() []string {
 	if s == nil {
 		return nil
+	}
+	if s.private != nil {
+		disk, err := s.private.finish()
+		if err != nil || disk == nil {
+			return nil
+		}
+		return disk.Paths()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -170,6 +205,9 @@ func (s *FileBodySource) Paths() []string {
 func (s *FileBodySource) WriteTo(w io.Writer) (int64, error) {
 	if s == nil || w == nil {
 		return 0, nil
+	}
+	if s.private != nil {
+		return s.private.writeTo(w)
 	}
 	var totalWritten int64
 	paths := s.Paths()
@@ -221,6 +259,15 @@ func (s *FileBodySource) Bytes() ([]byte, error) {
 func (s *FileBodySource) Cleanup() error {
 	if s == nil {
 		return nil
+	}
+	if s.private != nil {
+		disk, err := s.private.finish()
+		if disk != nil {
+			if errCleanup := disk.Cleanup(); errCleanup != nil && err == nil {
+				err = errCleanup
+			}
+		}
+		return err
 	}
 	s.mu.Lock()
 	if s.cleaned {
