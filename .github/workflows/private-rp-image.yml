@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BppleMan/Cli-Proxy-API-Management-Center
-          ref: a5455226b742f493bedd33faa5660cc7fc478f84
+          ref: 56d2aeafaebdc82c84049dc20247e89fb948301e
           path: management-panel
       - uses: oven-sh/setup-bun@v2
         with:
@@ -45,6 +45,8 @@ jobs:
           go test ./internal/translator/antigravity/openai/chat-completions ./internal/logging ./internal/runtime/executor -run 'Test(PrivateRP|AntigravityBuildRequest|ConvertOpenAIRequestToAntigravity)' -count=1
           go test ./internal/runtime/executor/helps ./sdk/api/handlers ./test -run TestPrivateRPQuota -count=1
           go test ./internal/registry ./internal/translator/antigravity/gemini -count=1
+          go test ./cmd/private-rp-logging-config -count=1
+          go test ./internal/logging ./internal/api/middleware ./internal/api/handlers/management ./internal/runtime/executor/helps -run TestPrivate -count=1
       - name: Build Linux binary with source revision
         env:
           CGO_ENABLED: '0'
